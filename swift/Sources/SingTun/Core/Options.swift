@@ -1,5 +1,6 @@
 // TunOptions mirrors the Go `Options` struct and contains all configuration
 // needed to bring up a TUN device and its routing rules.
+// Only iOS and macOS are targeted; Linux and Android-only fields have been removed.
 
 import Foundation
 
@@ -18,13 +19,10 @@ public struct TunOptions {
     /// Maximum Transmission Unit in bytes.
     public var mtu: UInt32
 
-    /// Enable Generic Segmentation Offload (Linux only; ignored elsewhere).
-    public var gso: Bool
-
     /// Automatically add routes for all traffic through this TUN.
     public var autoRoute: Bool
 
-    /// Restrict routes to the named interface scope (Darwin).
+    /// Restrict routes to the named interface scope.
     public var interfaceScope: Bool
 
     /// Override the IPv4 gateway address.
@@ -36,25 +34,11 @@ public struct TunOptions {
     /// DNS server addresses to advertise / hijack.
     public var dnsServers: [IPAddr]
 
-    /// ip rule / ip route table index (Linux).
-    public var ipRoute2TableIndex: Int
-
-    /// ip rule priority index (Linux).
-    public var ipRoute2RuleIndex: Int
-
-    /// Use mark-based redirect mode instead of port-based (Linux).
-    public var autoRedirectMarkMode: Bool
-    public var autoRedirectInputMark: UInt32
-    public var autoRedirectOutputMark: UInt32
-
-    /// Exclude MPTCP connections from the TUN (Linux).
-    public var excludeMPTCP: Bool
-
     /// Additional loopback addresses for the IPv4/IPv6 stack.
     public var inet4LoopbackAddress: [IPAddr]
     public var inet6LoopbackAddress: [IPAddr]
 
-    /// Enforce strict routing (no hairpin; Linux/Darwin).
+    /// Enforce strict routing (no hairpin).
     public var strictRoute: Bool
 
     /// Explicit route prefixes to install (overrides auto-route).
@@ -69,17 +53,6 @@ public struct TunOptions {
     public var includeInterface: [String]
     public var excludeInterface: [String]
 
-    /// UID ranges to include / exclude (Android).
-    public var includeUID: [ClosedRange<UInt32>]
-    public var excludeUID: [ClosedRange<UInt32>]
-
-    /// Android user IDs to include.
-    public var includeAndroidUser: [Int]
-
-    /// Android package names to include / exclude.
-    public var includePackage: [String]
-    public var excludePackage: [String]
-
     /// Use an already-open file descriptor rather than opening a new TUN socket.
     public var fileDescriptor: Int32
 
@@ -89,26 +62,16 @@ public struct TunOptions {
     /// Enable multi-pending-packet mode (experimental, Darwin).
     public var multiPendingPackets: Bool
 
-    /// Use sendmsg_x for batch writes (experimental, may crash on Darwin).
-    public var sendMsgX: Bool
-
     public init(name: String = "utun", mtu: UInt32 = 1500) {
         self.name                     = name
         self.inet4Address             = []
         self.inet6Address             = []
         self.mtu                      = mtu
-        self.gso                      = false
         self.autoRoute                = false
         self.interfaceScope           = false
         self.inet4Gateway             = nil
         self.inet6Gateway             = nil
         self.dnsServers               = []
-        self.ipRoute2TableIndex       = 2022
-        self.ipRoute2RuleIndex        = 9000
-        self.autoRedirectMarkMode     = false
-        self.autoRedirectInputMark    = 0x2023
-        self.autoRedirectOutputMark   = 0x2024
-        self.excludeMPTCP             = false
         self.inet4LoopbackAddress     = []
         self.inet6LoopbackAddress     = []
         self.strictRoute              = false
@@ -118,15 +81,9 @@ public struct TunOptions {
         self.inet6RouteExcludeAddress = []
         self.includeInterface         = []
         self.excludeInterface         = []
-        self.includeUID               = []
-        self.excludeUID               = []
-        self.includeAndroidUser       = []
-        self.includePackage           = []
-        self.excludePackage           = []
         self.fileDescriptor           = 0
         self.disableDNSHijack         = false
         self.multiPendingPackets      = false
-        self.sendMsgX                 = false
     }
 }
 
@@ -285,22 +242,35 @@ public extension TunOptions {
 
 // MARK: - Interface name calculator
 
-public func calculateInterfaceName(requested: String) -> String {
-    let prefix: String
-    #if os(macOS) || os(iOS)
-    prefix = "utun"
-    #else
-    prefix = requested.isEmpty ? "tun" : requested
-    #endif
+/// Returns a `utun` interface name that doesn't conflict with existing interfaces.
+public func calculateInterfaceName(requested: String = "") -> String {
+#if os(macOS) || os(iOS)
+    return calculateDarwinInterfaceName()
+#else
+    return "utun0"
+#endif
+}
 
+#if os(macOS) || os(iOS)
+import Darwin
+
+/// Returns all network interface names on the current Darwin host.
+private func calculateDarwinInterfaceName() -> String {
+    let prefix = "utun"
     var maxIndex = -1
-    if let interfaces = try? FileManager.default.contentsOfDirectory(atPath: "/sys/class/net") {
-        for iface in interfaces {
-            if iface.hasPrefix(prefix),
-               let idx = Int(iface.dropFirst(prefix.count)) {
+    var ifaddr: UnsafeMutablePointer<ifaddrs>?
+    if getifaddrs(&ifaddr) == 0 {
+        defer { freeifaddrs(ifaddr) }
+        var ptr = ifaddr
+        while let current = ptr {
+            if let name = current.pointee.ifa_name.map({ String(cString: $0) }),
+               name.hasPrefix(prefix),
+               let idx = Int(name.dropFirst(prefix.count)) {
                 maxIndex = max(maxIndex, idx)
             }
+            ptr = current.pointee.ifa_next
         }
     }
     return "\(prefix)\(maxIndex + 1)"
 }
+#endif

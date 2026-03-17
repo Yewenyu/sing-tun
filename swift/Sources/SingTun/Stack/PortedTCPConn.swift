@@ -1,6 +1,6 @@
 // Internal protocols that abstract the TCP listener / connection pair.
-// This lets SystemStack work with either BSD sockets (Linux) or
-// Network.framework's NWListener/NWConnection (Apple platforms).
+// This lets SystemStack work exclusively with Network.framework's
+// NWListener/NWConnection on iOS and macOS.
 
 // MARK: - PortedTCPConn
 
@@ -14,9 +14,8 @@ internal protocol PortedTCPConn: TCPConn {
 
 // MARK: - AnyTCPListener
 
-/// Abstraction over a TCP listener; implemented by both the BSD-socket
-/// `TCPListener` (Linux / raw-TUN) and `NWListenerTCPListener` (Apple /
-/// Network.framework).
+/// Abstraction over a TCP listener; implemented by `NWListenerTCPListener`
+/// (Network.framework) for iOS and macOS.
 internal protocol AnyTCPListener: AnyObject {
     /// The port the listener is bound to (available after `start()`).
     var port: UInt16 { get }

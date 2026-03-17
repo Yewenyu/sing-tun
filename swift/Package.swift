@@ -21,6 +21,10 @@ let package = Package(
             path: "Sources/SingTun",
             swiftSettings: [
                 .enableExperimentalFeature("StrictConcurrency"),
+            ],
+            linkerSettings: [
+                .linkedFramework("NetworkExtension"),
+                .linkedFramework("Network"),
             ]
         ),
         .testTarget(

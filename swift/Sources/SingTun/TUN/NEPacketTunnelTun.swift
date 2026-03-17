@@ -1,19 +1,22 @@
 // TUN device implementation backed by Apple's Network Extension framework.
-// Replaces the low-level utun socket approach used by NativeTun on
-// platforms where a NEPacketTunnelProvider is the entry point (iOS, macOS
-// Network Extensions).
+// Targets macOS (13+) and iOS (16+); Linux support has been removed.
 //
 // Usage (inside your NEPacketTunnelProvider subclass):
 //
-//   let tun = NEPacketTunnelTun(packetFlow: self.packetFlow)
+//   // 1. Apply network settings to the OS tunnel interface.
+//   let settings = tunOptions.buildNetworkSettings()
+//   try await self.setTunnelNetworkSettings(settings)
+//
+//   // 2. Wrap the packet flow and start the stack.
+//   let tun   = NEPacketTunnelTun(packetFlow: self.packetFlow)
 //   let stack = try newStack(options: StackOptions(tun: tun, ...))
 //   try stack.start()
 //
 // Unlike NativeTun (which opens a raw utun socket), this class:
 //  - Does NOT create the TUN interface (the NE framework does that).
-//  - Does NOT install routes (use NEPacketTunnelNetworkSettings instead).
-//  - Does NOT add a 4-byte AF_ family prefix to packets; NEPacketTunnelFlow
-//    delivers and accepts clean IP datagrams.
+//  - Does NOT install routes (call setTunnelNetworkSettings instead).
+//  - Does NOT add a 4-byte AF_ family prefix; NEPacketTunnelFlow delivers
+//    clean IP datagrams.
 
 #if canImport(NetworkExtension)
 
@@ -136,6 +139,107 @@ public enum NEPacketTunnelTunError: Error, LocalizedError {
         switch self {
         case .closed: return "NEPacketTunnelTun has been closed"
         }
+    }
+}
+
+// MARK: - TunOptions + NEPacketTunnelNetworkSettings
+
+public extension TunOptions {
+
+    /// Build an `NEPacketTunnelNetworkSettings` from this `TunOptions`.
+    ///
+    /// Typical usage inside `NEPacketTunnelProvider.startTunnel(options:completionHandler:)`:
+    ///
+    /// ```swift
+    /// let settings = tunOptions.buildNetworkSettings()
+    /// try await self.setTunnelNetworkSettings(settings)
+    /// ```
+    ///
+    /// The returned settings include:
+    ///  - IPv4 / IPv6 interface addresses and their prefix lengths
+    ///  - A matching set of included routes (from `buildAutoRouteRanges`)
+    ///  - DNS servers
+    ///  - MTU
+    func buildNetworkSettings() -> NEPacketTunnelNetworkSettings {
+        // Use the loopback address as the tunnel remote address – it is only
+        // used internally by the NE framework and never actually routed.
+        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
+
+        // ── IPv4 ────────────────────────────────────────────────────────────
+        if !inet4Address.isEmpty {
+            let addrs   = inet4Address.map { $0.addr.description }
+            let masks   = inet4Address.map { prefixLenToMask4($0.bits) }
+            let ipv4    = NEIPv4Settings(addresses: addrs, subnetMasks: masks)
+
+            // Included routes
+            let autoRanges = buildAutoRouteRanges(underNetworkExtension: true)
+            let v4routes   = autoRanges.filter { $0.addr.isV4 }.map { prefix in
+                NEIPv4Route(destinationAddress: prefix.addr.description,
+                            subnetMask:         prefixLenToMask4(prefix.bits))
+            }
+            if !v4routes.isEmpty {
+                ipv4.includedRoutes = v4routes
+            }
+
+            // Excluded routes
+            let exclRoutes = inet4RouteExcludeAddress.map { prefix in
+                NEIPv4Route(destinationAddress: prefix.addr.description,
+                            subnetMask:         prefixLenToMask4(prefix.bits))
+            }
+            if !exclRoutes.isEmpty {
+                ipv4.excludedRoutes = exclRoutes
+            }
+
+            settings.ipv4Settings = ipv4
+        }
+
+        // ── IPv6 ────────────────────────────────────────────────────────────
+        if !inet6Address.isEmpty {
+            let addrs       = inet6Address.map { $0.addr.description }
+            let prefixLens  = inet6Address.map { NSNumber(value: $0.bits) }
+            let ipv6        = NEIPv6Settings(addresses: addrs, networkPrefixLengths: prefixLens)
+
+            let autoRanges  = buildAutoRouteRanges(underNetworkExtension: true)
+            let v6routes    = autoRanges.filter { $0.addr.isV6 }.map { prefix in
+                NEIPv6Route(destinationAddress: prefix.addr.description,
+                            networkPrefixLength: NSNumber(value: prefix.bits))
+            }
+            if !v6routes.isEmpty {
+                ipv6.includedRoutes = v6routes
+            }
+
+            let exclRoutes = inet6RouteExcludeAddress.map { prefix in
+                NEIPv6Route(destinationAddress: prefix.addr.description,
+                            networkPrefixLength: NSNumber(value: prefix.bits))
+            }
+            if !exclRoutes.isEmpty {
+                ipv6.excludedRoutes = exclRoutes
+            }
+
+            settings.ipv6Settings = ipv6
+        }
+
+        // ── DNS ─────────────────────────────────────────────────────────────
+        if !dnsServers.isEmpty && !disableDNSHijack {
+            settings.dnsSettings = NEDNSSettings(servers: dnsServers.map { $0.description })
+        }
+
+        // ── MTU ─────────────────────────────────────────────────────────────
+        settings.mtu = NSNumber(value: mtu)
+
+        return settings
+    }
+
+    // MARK: - Private helpers
+
+    /// Convert a prefix-length (0–32) to a dotted-decimal subnet mask string.
+    private func prefixLenToMask4(_ bits: UInt8) -> String {
+        let bits32 = bits >= 32 ? UInt32.max : ~(UInt32.max >> bits)
+        let b0 = UInt8((bits32 >> 24) & 0xFF)
+        let b1 = UInt8((bits32 >> 16) & 0xFF)
+        let b2 = UInt8((bits32 >>  8) & 0xFF)
+        let b3 = UInt8( bits32        & 0xFF)
+        return "\(b0).\(b1).\(b2).\(b3)"
     }
 }
 

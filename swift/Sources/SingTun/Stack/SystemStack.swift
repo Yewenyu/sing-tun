@@ -575,225 +575,31 @@ private enum SystemStackError: Error {
 // MARK: - TCP listener factory
 
 /// Returns an `AnyTCPListener` backed by `NWListener` (Network.framework) on Apple
-/// platforms and by a raw BSD socket `TCPListener` on Linux.
+/// platforms. On other platforms a stub that always throws is returned.
 private func makeTCPListener(address: IPAddr) -> AnyTCPListener {
 #if canImport(Network)
     return NWListenerTCPListener(address: address)
 #else
-    return TCPListener(address: address)
+    return UnsupportedTCPListener()
 #endif
 }
 
-// MARK: - POSIX helpers (cross-platform)
+#if !canImport(Network)
+// Stub used only to satisfy the compiler on platforms without Network.framework.
+private final class UnsupportedTCPListener: AnyTCPListener {
+    var port: UInt16 = 0
+    func start() throws { fatalError("Network.framework not available on this platform") }
+    func accept() -> PortedTCPConn? { nil }
+    func stop() {}
+}
+#endif
+
+// MARK: - Darwin POSIX helpers
 
 #if canImport(Darwin)
 import Darwin
-
 private func posixClose(_ fd: Int32) { Darwin.close(fd) }
-private func posixRead(_ fd: Int32, _ buf: UnsafeMutableRawPointer, _ count: Int) -> Int {
-    Darwin.read(fd, buf, count)
-}
-private func posixWrite(_ fd: Int32, _ buf: UnsafeRawPointer, _ count: Int) -> Int {
-    Darwin.write(fd, buf, count)
-}
-private func posixAccept(_ fd: Int32, _ addr: UnsafeMutablePointer<sockaddr>?, _ len: UnsafeMutablePointer<socklen_t>?) -> Int32 {
-    Darwin.accept(fd, addr, len)
-}
-
-private func makeSockaddrIn(family: Int32) -> sockaddr_in {
-    var s = sockaddr_in()
-    s.sin_len    = UInt8(MemoryLayout<sockaddr_in>.size)
-    s.sin_family = UInt8(family)
-    return s
-}
-private func makeSockaddrIn6(family: Int32) -> sockaddr_in6 {
-    var s = sockaddr_in6()
-    s.sin6_len    = UInt8(MemoryLayout<sockaddr_in6>.size)
-    s.sin6_family = UInt8(family)
-    return s
-}
-private func sockaddrFamily(_ storage: sockaddr_storage) -> Int32 {
-    Int32(storage.ss_family)
-}
-
-#elseif canImport(Glibc)
-import Glibc
-
-private func posixClose(_ fd: Int32) { _ = Glibc.close(fd) }
-private func posixRead(_ fd: Int32, _ buf: UnsafeMutableRawPointer, _ count: Int) -> Int {
-    Glibc.read(fd, buf, count)
-}
-private func posixWrite(_ fd: Int32, _ buf: UnsafeRawPointer, _ count: Int) -> Int {
-    Glibc.write(fd, buf, count)
-}
-private func posixAccept(_ fd: Int32, _ addr: UnsafeMutablePointer<sockaddr>?, _ len: UnsafeMutablePointer<socklen_t>?) -> Int32 {
-    Glibc.accept(fd, addr, len)
-}
-
-private func makeSockaddrIn(family: Int32) -> sockaddr_in {
-    var s = sockaddr_in()
-    s.sin_family = sa_family_t(family)
-    return s
-}
-private func makeSockaddrIn6(family: Int32) -> sockaddr_in6 {
-    var s = sockaddr_in6()
-    s.sin6_family = sa_family_t(family)
-    return s
-}
-private func sockaddrFamily(_ storage: sockaddr_storage) -> Int32 {
-    Int32(storage.ss_family)
-}
 #endif
-
-// MARK: - TCPListener (thin wrapper around BSD sockets)
-
-final class TCPListener: AnyTCPListener {
-    private let address: IPAddr
-    private(set) var port: UInt16 = 0
-    private var fd: Int32 = -1
-    private var stopped = false
-
-    init(address: IPAddr, port: UInt16 = 0) {
-        self.address = address
-        self.port    = port
-    }
-
-    func start() throws {
-        let domain = address.isV4 ? AF_INET : AF_INET6
-        fd = socket(Int32(domain), Int32(SOCK_STREAM.rawValue), 0)
-        guard fd >= 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno)!)
-        }
-        var reuse: Int32 = 1
-        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
-
-        if address.isV4 {
-            var addr = makeSockaddrIn(family: AF_INET)
-            addr.sin_port = 0
-            addr.sin_addr = in_addr(s_addr: 0)
-            let bindResult = withUnsafePointer(to: &addr) {
-                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-                }
-            }
-            guard bindResult == 0 else {
-                posixClose(fd)
-                throw POSIXError(POSIXErrorCode(rawValue: errno)!)
-            }
-            var boundAddr = sockaddr_in()
-            var addrLen   = socklen_t(MemoryLayout<sockaddr_in>.size)
-            withUnsafeMutablePointer(to: &boundAddr) {
-                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    getsockname(fd, $0, &addrLen)
-                }
-            }
-            port = boundAddr.sin_port.bigEndian
-        } else {
-            var addr = makeSockaddrIn6(family: AF_INET6)
-            addr.sin6_port = 0
-            let bindResult = withUnsafePointer(to: &addr) {
-                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in6>.size))
-                }
-            }
-            guard bindResult == 0 else {
-                posixClose(fd)
-                throw POSIXError(POSIXErrorCode(rawValue: errno)!)
-            }
-            var boundAddr = sockaddr_in6()
-            var addrLen   = socklen_t(MemoryLayout<sockaddr_in6>.size)
-            withUnsafeMutablePointer(to: &boundAddr) {
-                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    getsockname(fd, $0, &addrLen)
-                }
-            }
-            port = boundAddr.sin6_port.bigEndian
-        }
-
-        guard listen(fd, 128) == 0 else {
-            posixClose(fd)
-            throw POSIXError(POSIXErrorCode(rawValue: errno)!)
-        }
-    }
-
-    func accept() -> PortedTCPConn? {
-        guard !stopped else { return nil }
-        var remoteAddr = sockaddr_storage()
-        var addrLen    = socklen_t(MemoryLayout<sockaddr_storage>.size)
-        let connFd     = withUnsafeMutablePointer(to: &remoteAddr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                posixAccept(fd, $0, &addrLen)
-            }
-        }
-        guard connFd >= 0 else { return nil }
-
-        var remotePort: UInt16 = 0
-        if sockaddrFamily(remoteAddr) == AF_INET {
-            var sa = sockaddr_in()
-            withUnsafePointer(to: remoteAddr) {
-                $0.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
-                    sa = $0.pointee
-                }
-            }
-            remotePort = sa.sin_port.bigEndian
-        } else {
-            var sa = sockaddr_in6()
-            withUnsafePointer(to: remoteAddr) {
-                $0.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) {
-                    sa = $0.pointee
-                }
-            }
-            remotePort = sa.sin6_port.bigEndian
-        }
-        return TCPConnImpl(fd: connFd, remotePort: remotePort)
-    }
-
-    func stop() {
-        stopped = true
-        if fd >= 0 { posixClose(fd); fd = -1 }
-    }
-}
-
-// MARK: - TCPConnImpl
-
-public final class TCPConnImpl: PortedTCPConn {
-    private let fd: Int32
-    public let remotePort: UInt16
-
-    init(fd: Int32, remotePort: UInt16) {
-        self.fd         = fd
-        self.remotePort = remotePort
-    }
-
-    deinit { posixClose(fd) }
-
-    public func read(into buffer: inout Data) throws -> Int {
-        var buf = Data(count: 65536)
-        let n   = buf.withUnsafeMutableBytes { ptr -> Int in
-            posixRead(fd, ptr.baseAddress!, ptr.count)
-        }
-        guard n >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno)!) }
-        buffer  = buf[..<n]
-        return n
-    }
-
-    public func write(_ data: Data) throws -> Int {
-        var d = data
-        let n  = d.withUnsafeMutableBytes { ptr -> Int in
-            posixWrite(fd, ptr.baseAddress!, ptr.count)
-        }
-        guard n >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno)!) }
-        return n
-    }
-
-    public func closeWrite() throws {
-        shutdown(fd, Int32(SHUT_WR))
-    }
-
-    public func close() throws {
-        posixClose(fd)
-    }
-}
 
 // MARK: - UDPDatagramConn (single-datagram stub)
 
@@ -811,10 +617,6 @@ final class UDPDatagramConn: UDPConn {
     func close() throws {}
 }
 
-// MARK: - packetOffset (Darwin = 4, others = 0)
-
-#if os(macOS) || os(iOS)
-private let packetOffset = 4
-#else
+// MARK: - packetOffset
+// NEPacketTunnelFlow delivers clean IP datagrams with no AF_ header prefix.
 private let packetOffset = 0
-#endif

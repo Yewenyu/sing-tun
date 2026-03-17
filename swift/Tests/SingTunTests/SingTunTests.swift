@@ -1,8 +1,11 @@
 import XCTest
-@testable import SingTun
 #if canImport(Network)
 import Network
 #endif
+#if canImport(NetworkExtension)
+import NetworkExtension
+#endif
+@testable import SingTun
 
 final class SingTunTests: XCTestCase {
 
@@ -251,7 +254,7 @@ final class SingTunTests: XCTestCase {
         XCTAssertEqual(t1, t1)
     }
 
-    // MARK: - NWConnectionStack tests (Apple platforms only)
+    // MARK: - NWConnectionStack tests (macOS / iOS only)
 
 #if canImport(Network)
     /// Verify that NWListenerTCPListener starts, reports a non-zero port,
@@ -317,6 +320,83 @@ final class SingTunTests: XCTestCase {
         wait(for: [expectation], timeout: 2.0)
     }
 #endif  // canImport(Network)
+
+    // MARK: - NEPacketTunnelNetworkSettings builder tests (macOS / iOS only)
+
+#if canImport(NetworkExtension)
+    func testBuildNetworkSettingsIPv4Only() {
+        var opts = TunOptions(name: "utun0", mtu: 1500)
+        opts.inet4Address = [IPPrefix(addr: IPAddr(v4: [198, 18, 0, 1]), bits: 16)]
+        opts.autoRoute    = true
+
+        let settings = opts.buildNetworkSettings()
+
+        XCTAssertNotNil(settings.ipv4Settings, "ipv4Settings must be set")
+        XCTAssertNil(settings.ipv6Settings,    "ipv6Settings must be nil when no IPv6 addresses are configured")
+        XCTAssertEqual(settings.mtu, NSNumber(value: 1500))
+
+        let ipv4 = settings.ipv4Settings!
+        XCTAssertEqual(ipv4.addresses, ["198.18.0.1"])
+        // /16 → 255.255.0.0
+        XCTAssertEqual(ipv4.subnetMasks, ["255.255.0.0"])
+        XCTAssertNotNil(ipv4.includedRoutes, "auto-route should produce included routes")
+        XCTAssertFalse(ipv4.includedRoutes!.isEmpty, "should have at least one included route")
+    }
+
+    func testBuildNetworkSettingsIPv6Only() {
+        var opts = TunOptions(name: "utun0", mtu: 9000)
+        let v6addr = IPAddr(v6: [0x26, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+        opts.inet6Address = [IPPrefix(addr: v6addr, bits: 48)]
+        opts.autoRoute    = true
+
+        let settings = opts.buildNetworkSettings()
+
+        XCTAssertNil(settings.ipv4Settings)
+        XCTAssertNotNil(settings.ipv6Settings)
+        XCTAssertEqual(settings.mtu, NSNumber(value: 9000))
+
+        let ipv6 = settings.ipv6Settings!
+        XCTAssertEqual(ipv6.networkPrefixLengths, [NSNumber(value: 48)])
+        XCTAssertNotNil(ipv6.includedRoutes)
+        XCTAssertFalse(ipv6.includedRoutes!.isEmpty)
+    }
+
+    func testBuildNetworkSettingsDNS() {
+        var opts = TunOptions(name: "utun0", mtu: 1500)
+        opts.inet4Address = [IPPrefix(addr: IPAddr(v4: [10, 0, 0, 1]), bits: 8)]
+        opts.dnsServers   = [IPAddr(v4: [8, 8, 8, 8]), IPAddr(v4: [8, 8, 4, 4])]
+
+        let settings = opts.buildNetworkSettings()
+
+        XCTAssertNotNil(settings.dnsSettings, "dnsSettings must be set when dnsServers is non-empty")
+        XCTAssertEqual(settings.dnsSettings?.servers, ["8.8.8.8", "8.8.4.4"])
+    }
+
+    func testBuildNetworkSettingsDNSHijackDisabled() {
+        var opts = TunOptions(name: "utun0", mtu: 1500)
+        opts.inet4Address    = [IPPrefix(addr: IPAddr(v4: [10, 0, 0, 1]), bits: 8)]
+        opts.dnsServers      = [IPAddr(v4: [8, 8, 8, 8])]
+        opts.disableDNSHijack = true
+
+        let settings = opts.buildNetworkSettings()
+
+        XCTAssertNil(settings.dnsSettings, "dnsSettings must be nil when disableDNSHijack is true")
+    }
+
+    func testBuildNetworkSettingsExcludedRoutes() {
+        var opts = TunOptions(name: "utun0", mtu: 1500)
+        opts.inet4Address             = [IPPrefix(addr: IPAddr(v4: [198, 18, 0, 1]), bits: 16)]
+        opts.autoRoute                = true
+        opts.inet4RouteExcludeAddress = [IPPrefix(addr: IPAddr(v4: [192, 168, 0, 0]), bits: 16)]
+
+        let settings = opts.buildNetworkSettings()
+
+        XCTAssertNotNil(settings.ipv4Settings?.excludedRoutes)
+        let excluded = settings.ipv4Settings?.excludedRoutes ?? []
+        XCTAssertTrue(excluded.contains { $0.destinationAddress == "192.168.0.0" },
+                      "excluded routes should contain 192.168.0.0/16")
+    }
+#endif  // canImport(NetworkExtension)
 }
 
 // MARK: - Test Helpers

@@ -1,9 +1,6 @@
 // Network.framework-based TCP listener and connection implementations.
 //
-// These replace the raw BSD-socket `TCPListener` / `TCPConnImpl` when running
-// on Apple platforms (macOS / iOS).  They expose the same internal
-// `AnyTCPListener` / `PortedTCPConn` protocols used by SystemStack, so
-// the stack logic is unchanged.
+// Targeting macOS (13+) and iOS (16+) exclusively; Linux support has been removed.
 //
 // Architecture with NEPacketTunnelTun + NWListenerTCPListener:
 //
@@ -25,8 +22,7 @@ import Network
 // MARK: - NWListenerTCPListener
 
 /// TCP listener backed by `Network.framework`'s `NWListener`.
-/// Conforms to the internal `AnyTCPListener` protocol so it can be used
-/// interchangeably with the BSD-socket `TCPListener`.
+/// Conforms to the internal `AnyTCPListener` protocol.
 final class NWListenerTCPListener: AnyTCPListener {
 
     // MARK: State
@@ -214,7 +210,7 @@ public final class NWConnectionUDPConn: UDPConn {
     private let remote:  SocksAddr
     private let queue =  DispatchQueue(label: "sing-tun.nwudp", qos: .utility)
 
-    init(remote: SocksAddr) throws {
+    public init(remote: SocksAddr) throws {
         guard let remoteAddr = remote.addr else {
             throw NWConnectionError.invalidAddress
         }
@@ -263,10 +259,10 @@ public final class NWConnectionUDPConn: UDPConn {
 
 // MARK: - NWConnectionError
 
-enum NWConnectionError: Error, LocalizedError {
+public enum NWConnectionError: Error, LocalizedError {
     case invalidAddress
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .invalidAddress: return "NWConnectionUDPConn: remote address has no IP component"
         }
@@ -274,3 +270,4 @@ enum NWConnectionError: Error, LocalizedError {
 }
 
 #endif // canImport(Network)
+
