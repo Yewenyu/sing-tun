@@ -121,8 +121,8 @@ public final class SystemStack: Stack {
 
     private var tcpNat:       TCPNat?
     private var directNat:    DirectRouteMapping?
-    private var tcpListener4: TCPListener?
-    private var tcpListener6: TCPListener?
+    private var tcpListener4: AnyTCPListener?
+    private var tcpListener6: AnyTCPListener?
     private var tcpPort4:     UInt16 = 0
     private var tcpPort6:     UInt16 = 0
 
@@ -205,7 +205,7 @@ public final class SystemStack: Stack {
 
         // Listen on IPv4
         if let addr4 = inet4Addr {
-            let listener = TCPListener(address: addr4, port: 0)
+            let listener = makeTCPListener(address: addr4)
             try listener.start()
             tcpPort4   = listener.port
             tcpListener4 = listener
@@ -214,7 +214,7 @@ public final class SystemStack: Stack {
 
         // Listen on IPv6
         if let addr6 = inet6Addr {
-            let listener = TCPListener(address: addr6, port: 0)
+            let listener = makeTCPListener(address: addr6)
             try listener.start()
             tcpPort6   = listener.port
             tcpListener6 = listener
@@ -461,7 +461,7 @@ public final class SystemStack: Stack {
 
     // MARK: Accept loop
 
-    private func acceptLoop(listener: TCPListener, isIPv6: Bool) {
+    private func acceptLoop(listener: AnyTCPListener, isIPv6: Bool) {
         while !isStopped {
             guard let conn = listener.accept() else { return }
             let remotePort = conn.remotePort
@@ -572,6 +572,18 @@ private enum SystemStackError: Error {
     case missingInterfaceAddress
 }
 
+// MARK: - TCP listener factory
+
+/// Returns an `AnyTCPListener` backed by `NWListener` (Network.framework) on Apple
+/// platforms and by a raw BSD socket `TCPListener` on Linux.
+private func makeTCPListener(address: IPAddr) -> AnyTCPListener {
+#if canImport(Network)
+    return NWListenerTCPListener(address: address)
+#else
+    return TCPListener(address: address)
+#endif
+}
+
 // MARK: - POSIX helpers (cross-platform)
 
 #if canImport(Darwin)
@@ -635,13 +647,13 @@ private func sockaddrFamily(_ storage: sockaddr_storage) -> Int32 {
 
 // MARK: - TCPListener (thin wrapper around BSD sockets)
 
-final class TCPListener {
+final class TCPListener: AnyTCPListener {
     private let address: IPAddr
     private(set) var port: UInt16 = 0
     private var fd: Int32 = -1
     private var stopped = false
 
-    init(address: IPAddr, port: UInt16) {
+    init(address: IPAddr, port: UInt16 = 0) {
         self.address = address
         self.port    = port
     }
@@ -704,7 +716,7 @@ final class TCPListener {
         }
     }
 
-    func accept() -> TCPConnImpl? {
+    func accept() -> PortedTCPConn? {
         guard !stopped else { return nil }
         var remoteAddr = sockaddr_storage()
         var addrLen    = socklen_t(MemoryLayout<sockaddr_storage>.size)
@@ -744,7 +756,7 @@ final class TCPListener {
 
 // MARK: - TCPConnImpl
 
-public final class TCPConnImpl: TCPConn {
+public final class TCPConnImpl: PortedTCPConn {
     private let fd: Int32
     public let remotePort: UInt16
 

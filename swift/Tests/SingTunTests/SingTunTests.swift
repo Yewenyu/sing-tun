@@ -1,5 +1,8 @@
 import XCTest
 @testable import SingTun
+#if canImport(Network)
+import Network
+#endif
 
 final class SingTunTests: XCTestCase {
 
@@ -247,6 +250,73 @@ final class SingTunTests: XCTestCase {
         XCTAssertNotEqual(t1, t2)
         XCTAssertEqual(t1, t1)
     }
+
+    // MARK: - NWConnectionStack tests (Apple platforms only)
+
+#if canImport(Network)
+    /// Verify that NWListenerTCPListener starts, reports a non-zero port,
+    /// and that an NWConnectionTCPConn can send and receive data through it.
+    func testNWListenerAndConnection() throws {
+        // Bind to loopback so no special entitlements are needed.
+        let loopback = IPAddr(v4: [127, 0, 0, 1])
+        let listener = NWListenerTCPListener(address: loopback)
+        try listener.start()
+        let listenPort = listener.port
+        XCTAssertGreaterThan(listenPort, 0, "listener should bind to a non-zero port")
+
+        // Client connection to loopback:listenPort
+        let clientEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: listenPort)!)
+        let clientConn     = NWConnection(to: clientEndpoint, using: .tcp)
+        let clientQueue    = DispatchQueue(label: "test.client")
+        clientConn.start(queue: clientQueue)
+
+        // Accept the server-side connection
+        let serverConn = listener.accept()
+        XCTAssertNotNil(serverConn, "listener.accept() should return a connection")
+
+        // Send "hello" from client → server
+        let payload = "hello".data(using: .utf8)!
+        var writeErr: Error?
+        let writeSema = DispatchSemaphore(value: 0)
+        clientConn.send(content: payload, completion: .contentProcessed { error in
+            writeErr = error
+            writeSema.signal()
+        })
+        writeSema.wait()
+        XCTAssertNil(writeErr, "client send should succeed")
+
+        // Read on the server side
+        var readBuf = Data()
+        let readResult = try serverConn?.read(into: &readBuf)
+        XCTAssertEqual(readBuf, payload, "server should receive the exact payload")
+        XCTAssertEqual(readResult, payload.count)
+
+        // Teardown
+        try serverConn?.close()
+        clientConn.cancel()
+        listener.stop()
+    }
+
+    /// Verify that NWListenerTCPListener.accept() unblocks when stop() is called.
+    func testNWListenerStopUnblocksAccept() throws {
+        let loopback = IPAddr(v4: [127, 0, 0, 1])
+        let listener = NWListenerTCPListener(address: loopback)
+        try listener.start()
+
+        let expectation = XCTestExpectation(description: "accept unblocks after stop")
+        Thread.detachNewThread {
+            let result = listener.accept()
+            XCTAssertNil(result, "accept() should return nil after stop()")
+            expectation.fulfill()
+        }
+
+        // Give the thread time to start and block in accept()
+        Thread.sleep(forTimeInterval: 0.1)
+        listener.stop()
+
+        wait(for: [expectation], timeout: 2.0)
+    }
+#endif  // canImport(Network)
 }
 
 // MARK: - Test Helpers
